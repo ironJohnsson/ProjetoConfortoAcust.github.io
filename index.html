@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"/>
+  <title>Simulador VR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+
+  <!-- Apenas o loader HDR (NÃO carrega outro THREE, só o loader) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158/examples/js/loaders/RGBELoader.js"></script>
+
+  <style>
+    html,body{
+      margin:0;
+      height:100%;
+      background:#000;
+      overflow:hidden;
+      font-family:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #start{
+      position:absolute;
+      left:50%;
+      transform:translateX(-50%);
+      bottom:20px;
+      background:rgba(0,0,0,.85);
+      color:#fff;
+      padding:12px 18px;
+      border-radius:8px;
+      border:none;
+      cursor:pointer;
+      z-index:999;
+    }
+    #log{
+      position:absolute;
+      left:10px;
+      top:10px;
+      padding:8px 10px;
+      background:rgba(0,0,0,.55);
+      color:#fff;
+      font-size:11px;
+      border-radius:6px;
+      max-width:320px;
+      z-index:998;
+    }
+  </style>
+</head>
+<body>
+
+<button id="start">Clique para iniciar o vídeo com som</button>
+<div id="log">Pronto para iniciar.</div>
+
+<a-scene
+  apply-hdr="src: german_town_street_4k.hdr"
+  spatial-audio-follow-camera
+  renderer="antialias:true; physicallyCorrectLights:true; colorManagement:true; toneMapping:ACESFilmic; exposure:1.4"
+  webxr="optionalFeatures: local-floor, hand-tracking"
+  background="color:#000">
+
+  <a-assets timeout="30000">
+    <a-asset-item id="car" src="porsche_911_with_interior.glb"></a-asset-item>
+
+    <!-- Vídeo 360 com áudio embutido -->
+    <video id="roadVideo"
+           src="video360.mp4"
+           preload="auto"
+           playsinline
+           webkit-playsinline
+           loop
+           crossorigin="anonymous">
+    </video>
+  </a-assets>
+
+  <!-- =========================
+       DRIVER / CÂMERA / MÃOS
+       (posição perfeita que você passou)
+       ========================== -->
+  <a-entity id="driverRig" position="-0.55735 1.03452 -2.94594" rotation="0 -102.822 0">
+
+    <!-- Câmera dentro do carro, já com a rotação do Inspector -->
+    <a-entity id="camera" camera="" wasd-controls-enabled="false" look-controls="" position="" rotation="-7.563042895726892 -23.94963583646842 0" data-aframe-inspector-original-camera="">
+    </a-entity>
+
+    <!-- Mãos com hand tracking, acopladas ao rig (seguem o banco) -->
+    <a-entity id="hand-left" hand-tracking-controls="hand: left">
+    </a-entity>
+
+    <a-entity id="hand-right" hand-tracking-controls="">
+    </a-entity>
+  </a-entity>
+
+  <!-- =========================
+       Porsche 911 interior
+       (mesma posição que você marcou)
+       ========================== -->
+  <a-entity id="car-entity" gltf-model="porsche_911_with_interior.glb" steering-system="" position="1.53457 0.156 -1.22347" rotation="0 -36.58450113469333 0" scale="" shadow="">
+  </a-entity>
+  <!-- =========================
+       Para-brisa com vídeo
+       (mesma posição/altura, mas agora 180°)
+       ========================== -->
+  <a-entity id="curvedScreen"
+            geometry="primitive:cylinder;
+                      radius:3.0;
+                      height:2.2;
+                      thetaLength:360;
+                      openEnded:true"
+            material="shader:flat; src:#roadVideo; side:back"
+            position="0 1.156 -2.10"
+            rotation="0 2 0">
+  </a-entity>
+
+  <!-- Luzes suavizadas para PBR (seu setup original) -->
+  <a-entity light="type:ambient; intensity:0.28; color:#ffffff"></a-entity>
+  <a-entity light="intensity:1.45; castShadow:true"
+            position="-0.34304 1.30643 -1.6916"></a-entity>
+  <a-entity light="type:point; intensity:0.55; distance:6; decay:1"
+            position="0 1.35 0.8"></a-entity>
+
+  <!-- Piso sutil -->
+  <a-entity geometry="primitive:plane; width:8; height:8"
+            rotation="-90 0 0" position="0 0 0"
+            material="color:#111; metalness:0.65; roughness:0.35; envMapIntensity:0.7">
+  </a-entity>
+
+  <!-- Painel de UI (posição aproximada, você pode refinar depois) -->
+  <a-entity id="hudPanel"
+            position="0 1.05 -2.4"
+            rotation="-15 0 0">
+    <a-plane width="0.32" height="0.18" color="#111" opacity="0.92">
+      <a-entity id="btnDesconforto"
+                geometry="primitive:plane; width:0.28; height:0.07"
+                position="0 0 0.01"
+                material="color:#e11d48"
+                text="value: Registrar desconforto; align:center; color:#fff; wrapCount:18">
+      </a-entity>
+    </a-plane>
+  </a-entity>
+
+</a-scene>
+
+<script>
+/* =========================================================
+   VARIÁVEIS GLOBAIS DE ÁUDIO / HAPTICS
+   ========================================================= */
+let audioCtx = null;
+let audioSource = null;
+let audioAnalyser = null;
+let audioPanner = null;
+let hapticsEnabled = true;
+
+/* =========================================================
+   COMPONENTE: HDR ENVIRONMENT (com proteção)
+   ========================================================= */
+AFRAME.registerComponent('apply-hdr', {
+  schema: { src: { default: 'german_town_street_4k.hdr' } },
+
+  init: function () {
+    const sceneEl = this.el;
+    const renderer = sceneEl.renderer;
+    const sceneObj = sceneEl.object3D;
+
+    if (!window.THREE || !THREE.RGBELoader) {
+      console.warn('[HDR] THREE.RGBELoader não encontrado. Cena segue sem HDR.');
+      return;
+    }
+    if (!renderer) {
+      console.warn('[HDR] Renderer ainda não disponível.');
+      return;
+    }
+
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+
+    const loader = new THREE.RGBELoader();
+    loader.setDataType(THREE.UnsignedByteType);
+
+    loader.load(
+      this.data.src,
+      (hdrTexture) => {
+        try {
+          hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+          const envMap = pmrem.fromEquirectangular(hdrTexture).texture;
+
+          sceneObj.environment = envMap;
+          console.log('[HDR] Ambiente aplicado com sucesso.');
+        } catch (e) {
+          console.warn('[HDR] Erro ao aplicar HDR:', e);
+        }
+      },
+      undefined,
+      (err) => {
+        console.warn('[HDR] Falha ao carregar HDR:', err);
+      }
+    );
+  }
+});
+
+/* =========================================================
+   COMPONENTE: VOLANTE + SYNC COM VÍDEO + MÃO DIREITA
+   ========================================================= */
+AFRAME.registerComponent('steering-system', {
+  schema: {
+    wheelName: {default: 'SteeringWheel'},
+    handId: {default: '#hand-right'},
+    maxAngleDeg: {default: 450},
+    handFactor: {default: 4}
+  },
+  init: function () {
+    this.wheel = null;
+    this.hand = document.querySelector(this.data.handId);
+    this.lastHandX = null;
+    this.userDelta = 0;   // contribuição da mão
+    this.baseAngle = 0;   // contribuição do vídeo
+    this.video = document.getElementById('roadVideo');
+
+    this.tmpHandPos = new THREE.Vector3();
+    this.tmpWheelPos = new THREE.Vector3();
+
+    // keyframes de exemplo: ajuste depois com o vídeo real
+    this.keys = [
+      {t: 0,  angle: 0},
+      {t: 5,  angle: 10},
+      {t:10, angle: -20},
+      {t:15, angle: 0}
+    ];
+
+    this.el.addEventListener('model-loaded', () => {
+      const mesh = this.el.getObject3D('mesh');
+      if (!mesh) return;
+      this.wheel = mesh.getObjectByName(this.data.wheelName);
+      if (!this.wheel) {
+        console.warn('[Steering] Volante não encontrado. Ajuste wheelName conforme o GLB.');
+      } else {
+        console.log('[Steering] Volante encontrado:', this.data.wheelName);
+      }
+    });
+  },
+  updateBaseAngleFromVideo: function () {
+    if (!this.video || !this.keys || this.keys.length === 0) return;
+    const t = this.video.currentTime;
+    const keys = this.keys;
+
+    let i = 0;
+    while (i < keys.length - 1 && t > keys[i+1].t) i++;
+    const k1 = keys[i];
+    const k2 = keys[Math.min(i+1, keys.length - 1)];
+
+    const alpha = (t - k1.t) / Math.max(0.0001, (k2.t - k1.t));
+    this.baseAngle = THREE.MathUtils.lerp(k1.angle, k2.angle, alpha);
+  },
+  updateUserDeltaFromHand: function () {
+    if (!this.wheel || !this.hand) return;
+
+    const handObj = this.hand.object3D;
+    const wheelObj = this.wheel;
+
+    handObj.getWorldPosition(this.tmpHandPos);
+    wheelObj.getWorldPosition(this.tmpWheelPos);
+
+    const dist = this.tmpHandPos.distanceTo(this.tmpWheelPos);
+
+    // região aproximada de "pegada" no volante
+    if (dist < 0.25) {
+      if (this.lastHandX === null) {
+        this.lastHandX = this.tmpHandPos.x;
+      } else {
+        const dx = this.tmpHandPos.x - this.lastHandX;
+        this.lastHandX = this.tmpHandPos.x;
+        this.userDelta += dx * this.data.handFactor;
+        const maxDelta = this.data.maxAngleDeg * 0.5;
+        this.userDelta = THREE.MathUtils.clamp(this.userDelta, -maxDelta, maxDelta);
+      }
+    } else {
+      this.lastHandX = null;
+    }
+  },
+  tick: function () {
+    if (!this.wheel) return;
+
+    // 1) Atualiza ângulo base pelo vídeo
+    this.updateBaseAngleFromVideo();
+
+    // 2) Atualiza contribuição da mão direita
+    this.updateUserDeltaFromHand();
+
+    // 3) Aplica ângulo final
+    const totalDeg = this.baseAngle + this.userDelta;
+    const maxDeg = this.data.maxAngleDeg;
+    const clampedDeg = THREE.MathUtils.clamp(totalDeg, -maxDeg, maxDeg);
+    this.wheel.rotation.y = THREE.MathUtils.degToRad(clampedDeg);
+  }
+});
+
+/* =========================================================
+   COMPONENTE: ÁUDIO ESPACIAL (fonte segue a cabeça)
+   ========================================================= */
+AFRAME.registerComponent('spatial-audio-follow-camera', {
+  tick: function () {
+    if (!audioPanner) return;
+    const sceneEl = this.el;
+    const camEl = sceneEl.camera && sceneEl.camera.el;
+    if (!camEl) return;
+
+    const cam = camEl.object3D;
+    const dir = new THREE.Vector3();
+    cam.getWorldDirection(dir);
+
+    // fonte ~1m à frente da cabeça
+    audioPanner.setPosition(dir.x, dir.y, dir.z);
+  }
+});
+
+/* =========================================================
+   COMPONENTE: BOTÃO DE DESCONFORTO (UI + mãos)
+   ========================================================= */
+AFRAME.registerComponent('hand-button', {
+  schema: {
+    handLeft:  {default: '#hand-left'},
+    handRight: {default: '#hand-right'}
+  },
+  init: function () {
+    this.handL = document.querySelector(this.data.handLeft);
+    this.handR = document.querySelector(this.data.handRight);
+    this.wasCloseL = false;
+    this.wasCloseR = false;
+    this.tmpHand = new THREE.Vector3();
+    this.tmpBtn  = new THREE.Vector3();
+    this.logEl   = document.getElementById('log');
+  },
+  checkHand: function (handEl, flagName) {
+    if (!handEl) return;
+    const handObj = handEl.object3D;
+    const btnObj  = this.el.object3D;
+
+    handObj.getWorldPosition(this.tmpHand);
+    btnObj.getWorldPosition(this.tmpBtn);
+    const dist = this.tmpHand.distanceTo(this.tmpBtn);
+
+    const wasClose = this[flagName];
+    const closeNow = dist < 0.09; // limiar simples de "toque"
+
+    if (!wasClose && closeNow) {
+      const t = document.getElementById('roadVideo').currentTime.toFixed(2);
+      console.log('[UI] Desconforto registrado em t=' + t + 's');
+      if (this.logEl) {
+        this.logEl.textContent = 'Desconforto registrado em t=' + t + 's';
+      }
+      // aqui dá pra logar em array, backend, etc.
+    }
+    this[flagName] = closeNow;
+  },
+  tick: function () {
+    this.checkHand(this.handL, 'wasCloseL');
+    this.checkHand(this.handR, 'wasCloseR');
+  }
+});
+
+// aplica o componente ao botão após o DOM carregar
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('btnDesconforto');
+  if (btn) btn.setAttribute('hand-button', '');
+});
+
+/* =========================================================
+   ÁUDIO: grafo + HAPTICS
+   ========================================================= */
+const startBtn  = document.getElementById('start');
+const roadVideo = document.getElementById('roadVideo');
+const logEl     = document.getElementById('log');
+
+async function initAudioGraph() {
+  if (audioCtx) return;
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) {
+    console.warn('AudioContext não suportado.');
+    return;
+  }
+
+  audioCtx = new AC();
+  audioSource   = audioCtx.createMediaElementSource(roadVideo);
+  audioAnalyser = audioCtx.createAnalyser();
+  audioAnalyser.fftSize = 2048;
+
+  audioPanner = audioCtx.createPanner();
+  audioPanner.panningModel  = 'HRTF';
+  audioPanner.distanceModel = 'inverse';
+  audioPanner.setPosition(0, 0, -1);
+
+  audioSource.connect(audioAnalyser);
+  audioAnalyser.connect(audioPanner);
+  audioPanner.connect(audioCtx.destination);
+
+  await audioCtx.resume();
+  console.log('[Audio] Grafo de áudio inicializado.');
+}
+
+function updateHapticsLoop() {
+  if (!audioAnalyser || !hapticsEnabled) {
+    requestAnimationFrame(updateHapticsLoop);
+    return;
+  }
+
+  const sceneEl = document.querySelector('a-scene');
+  if (!sceneEl || !sceneEl.renderer || !sceneEl.renderer.xr) {
+    requestAnimationFrame(updateHapticsLoop);
+    return;
+  }
+
+  const session = sceneEl.renderer.xr.getSession && sceneEl.renderer.xr.getSession();
+  if (!session) {
+    requestAnimationFrame(updateHapticsLoop);
+    return;
+  }
+
+  const data = new Uint8Array(audioAnalyser.frequencyBinCount);
+  audioAnalyser.getByteFrequencyData(data);
+
+  // média em banda de frequência (ajustar conforme o "som" que você quer sentir)
+  let sum = 0, count = 0;
+  for (let i = 40; i < 140; i++) { sum += data[i]; count++; }
+  const level = sum / Math.max(1, count); // 0..255
+  const intensity = Math.min(1, level / 220); // normaliza 0..1
+
+  session.inputSources.forEach(src => {
+    const gp = src.gamepad;
+    if (!gp || !gp.hapticActuators || gp.hapticActuators.length === 0) return;
+    const act = gp.hapticActuators[0];
+    if (act && act.pulse) {
+      act.pulse(intensity, 0.03); // pulso de ~30 ms
+    }
+  });
+
+  requestAnimationFrame(updateHapticsLoop);
+}
+
+/* =========================================================
+   CLIQUE: iniciar vídeo + áudio + haptics
+   ========================================================= */
+startBtn.addEventListener('click', async () => {
+  try {
+    await initAudioGraph();     // usa só o áudio do PRÓPRIO vídeo
+    roadVideo.muted  = false;
+    roadVideo.volume = 1.0;    // volume máximo para a avaliação
+    await roadVideo.play();
+    startBtn.style.display = 'none';
+    if (logEl) logEl.textContent = 'Experiência em andamento...';
+
+    // inicia o loop de haptics baseado no áudio
+    requestAnimationFrame(updateHapticsLoop);
+  } catch (e) {
+    console.warn('Erro ao iniciar vídeo:', e);
+    if (logEl) logEl.textContent = 'Erro ao iniciar o vídeo (veja o console).';
+  }
+});
+</script>
+
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"/>
+  <title>Cockpit VR (veiculo + áudio)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <style>
+    html,body{margin:0;height:100%;background:#000;overflow:hidden}
+    #start{position:absolute;left:50%;transform:translateX(-50%);bottom:20px;
+      background:rgba(0,0,0,.85);color:#fff;padding:12px 18px;border-radius:8px;
+      font-family:system-ui,sans-serif;z-index:9}
+    #hud{position:absolute;left:12px;bottom:12px;z-index:9;color:#fff;
+      background:rgba(0,0,0,.5);padding:8px 10px;border-radius:8px;font:12px/1.4 system-ui}
+  </style>
+</head>
+<body>
+  <div id="hud">↑/↓ distância • ←/→ altura ·Ajustar o banco</div>
+  <button id="start">Clique para iniciar o vídeo com som</button>
+
+  <a-scene
+    renderer="antialias:true; physicallyCorrectLights:true; colorManagement:true; toneMapping:ACESFilmic; exposure:1.1"
+    background="color:#000"
+    webxr="optionalFeatures: local-floor, hand-tracking">
+
+    <a-assets timeout="30000">
+      <!-- Arquivos no MESMO diretório deste HTML -->
+      <a-asset-item id="car" src="porsche_911_with_interior.glb"></a-asset-item>
+      <video id="roadVideo" src="video360.mp4"
+             preload="auto" loop playsinline webkit-playsinline crossorigin="anonymous"></video>
+    </a-assets>
+
+    <!-- Rig/câmera com ajuste de banco (valores do seu Inspector) -->
+    <a-entity id="driverRig" position="-2.56862 1.01983 -2.73549" seat-adjust="" rotation="0 -102.822 0">
+      <a-entity id="camera" camera="" wasd-controls-enabled="false" look-controls="" position="" rotation="-4.010704565915757 -2.2918311805232903 0" data-aframe-inspector-original-camera=""></a-entity>
+    </a-entity>
+
+    <!-- Porsche 911 interior -->
+    <a-entity gltf-model="#car"
+              position="0 0.156 -2.083" rotation="0 -6.947686223756363 0" scale="1 1 1"
+              shadow="cast:true; receive:true"></a-entity>
+
+    <!-- Para-brisa com vídeo (curvatura/altura otimizadas) -->
+    <a-entity id="curvedScreen"
+              geometry="primitive:cylinder; radius:3.0; height:2.2; thetaLength:125; openEnded:true"
+              material="shader:flat; src:#roadVideo; side:back"
+              position="0 1.156 -2.10" rotation="0 2 0">
+    </a-entity>
+
+    <!-- Luzes suavizadas para PBR -->
+    <a-entity light="type:ambient; intensity:0.28; color:#ffffff"></a-entity>
+    <a-entity light="intensity:1.45; castShadow:true" position="-0.34304 1.30643 -1.6916"></a-entity>
+    <a-entity light="type:point; intensity:0.55; distance:6; decay:1" position="0 1.35 0.8"></a-entity>
+
+    <!-- Piso sutil -->
+    <a-entity geometry="primitive:plane; width:8; height:8"
+              rotation="-90 0 0" position="0 0 0"
+              material="color:#111; metalness:0.65; roughness:0.35; envMapIntensity:0.7"></a-entity>
+
+    <script>
+      // ===== Iniciar vídeo COM ÁUDIO após gesto do usuário =====
+      const btn = document.getElementById('start');
+      const vid = document.getElementById('roadVideo');
+
+      // Libera o contexto de áudio em navegadores como Oculus Browser/Chrome
+      async function unlockAudioContext() {
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return;
+          const ctx = new AC();
+          // Emite um som silencioso instantâneo só para "destravar" o contexto
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          gain.gain.value = 0;
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(0); osc.stop(0);
+          await ctx.resume();
+        } catch {}
+      }
+
+      async function playWithSound() {
+        try {
+          await unlockAudioContext();
+          vid.muted = false;     // som ligado
+          vid.volume = 1.0;      // volume máximo
+          await vid.play();      // inicia com áudio
+          btn.style.display = 'none';
+        } catch (e) {
+          console.warn('Erro ao reproduzir vídeo:', e);
+        }
+      }
+
+      // Requer clique do usuário para tocar com som
+      btn.addEventListener('click', playWithSound);
+
+      // ===== Ajuste de banco: setas e thumbstick =====
+      AFRAME.registerComponent('seat-adjust', {
+        schema:{
+          stepY:{default:0.02}, stepZ:{default:0.03},
+          minY:{default:0.95}, maxY:{default:1.30},
+          minZ:{default:-0.22}, maxZ:{default:0.32}
+        },
+        init:function(){
+          const rig=this.el, s=this.data;
+          // Teclado
+          window.addEventListener('keydown', e=>{
+            const p=rig.object3D.position;
+            if(e.key==='ArrowUp')   p.z = THREE.MathUtils.clamp(p.z - s.stepZ, s.minZ, s.maxZ);
+            if(e.key==='ArrowDown') p.z = THREE.MathUtils.clamp(p.z + s.stepZ, s.minZ, s.maxZ);
+            if(e.key==='ArrowLeft') p.y = THREE.MathUtils.clamp(p.y + s.stepY, s.minY, s.maxY);
+            if(e.key==='ArrowRight')p.y = THREE.MathUtils.clamp(p.y - s.stepY, s.minY, s.maxY);
+          });
+          // Thumbstick (VR)
+          const onAxis = evt=>{
+            const [x,y]=evt.detail.axis; const p=rig.object3D.position;
+            p.y = THREE.MathUtils.clamp(p.y + (-x)*0.012, s.minY, s.maxY); // X = sobe/desce
+            p.z = THREE.MathUtils.clamp(p.z + ( y)*0.020, s.minZ, s.maxZ); // Y = frente/trás
+          };
+          const scene = this.el.sceneEl;
+          ['left','right'].forEach(hand=>{
+            const e=document.createElement('a-entity');
+            e.setAttribute('laser-controls',`hand: ${hand}`);
+            e.setAttribute('raycaster','enabled:false');
+            scene.appendChild(e);
+            e.addEventListener('axismove', onAxis);
+          });
+        }
+      });
+    </script>
+  </a-scene>
+</body>
+</html>
